@@ -50,21 +50,38 @@ module.exports = function(RED) {
       this.returnArray = false;
 
       // Load information from the devices list
-      this.loadDeviceData = function() {
+      this.loadDeviceData = async function() {
          var deviceList = [];
          var fsOptions = { "encoding":"utf8", "flag":"r" };
          var dirs = fs.readdirSync(W1DIRS, "utf8");
          for (var iY=0; iY<dirs.length; iY++) {
             if ((dirs[iY].startsWith && dirs[iY].startsWith("w1_bus_master")) ||
                 (dirs[iY].indexOf("w1_bus_master") !== -1)) {
-               var devs = fs.readFileSync(W1DIRS + dirs[iY] + 
+		const bulkReadPath = W1DIRS + '/' + dirs[iY] + '/therm_bulk_read';
+	       const supportsBatchRead = await fs.existsSync(bulkReadPath);
+	       if (supportsBatchRead) {
+		       console.log('triggering batch read');
+		       await new Promise((resolve, reject) => fs.writeFile(bulkReadPath, 'trigger\n',{encoding:'utf8'}, err => {if (err) {reject(err)} else {resolve()}}));
+		       let ready = false;
+		       while (!ready) {
+			       const batchReady = await new Promise((resolve, reject) => fs.readFile(bulkReadPath, fsOptions, (err, data) => {if (err) {reject(err)} else {resolve(data)}}));
+			       console.log({batchReady});
+			       if (batchReady.startsWith('1')) {
+				       ready = true;
+			       } else {
+				       await new Promise(resolve => setTimeout(resolve, 100));
+			       }
+		       }
+		       }
+
+               var devList = fs.readFileSync(W1DIRS + dirs[iY] + 
                              "/w1_master_slaves", fsOptions).split("\n");
-               for (var iX=0; iX<devs.length; iX++) {
-                  if (devs[iX] !== undefined && devs[iX] !== ""
-                                             && devs[iX] !== "not found.") {
-                     var fName = W1PATH + "/" + devs[iX] + "/w1_slave";
+	       const devicePackets = await Promise.all(devList.map(async deviceId => {
+                  if (deviceId !== undefined && deviceId !== ""
+                                             && deviceId !== "not found.") {
+                     var fName = W1PATH + "/" + deviceId + "/w1_slave";
                      if (fs.existsSync(fName)) {
-                        var fData = fs.readFileSync(fName, fsOptions).trim();
+                        var fData = await new Promise((resolve, reject) => fs.readFile(fName, fsOptions, (err, data) => {if (err) {reject(err)} else {resolve(data)}})).then(data => data.trim());
                         // Extract the numeric part
                         var tBeg = fData.indexOf("t=")+2;
                         if (tBeg >= 0) {
@@ -74,21 +91,22 @@ module.exports = function(RED) {
                               tEnd++;
                            }
                            var temp   = fData.substring(tBeg, tEnd);
-                           var tmpDev = devs[iX].substr(13,2) + devs[iX].substr(11,2) +
-                                        devs[iX].substr(9,2)  + devs[iX].substr(7,2)  +
-                                        devs[iX].substr(5,2)  + devs[iX].substr(3,2);
+                           var tmpDev = deviceId.substr(13,2) + deviceId.substr(11,2) +
+                                        deviceId.substr(9,2)  + deviceId.substr(7,2)  +
+                                        deviceId.substr(5,2)  + deviceId.substr(3,2);
    
-                           deviceList.push({
-                               "family": devs[iX].substr(0,2),
+                           return{
+                               "family": deviceId.substr(0,2),
                                "id":     tmpDev.toUpperCase(),
                                "dir":    dirs[iY],
-                               "file":   devs[iX],
+                               "file":   deviceId,
                                "temp":   temp/1000.0
-                           });
+                           };
                         }
                      }
                   }
-               }
+               }));
+	       deviceList.push(...devicePackets.filter(packet => packet));
             }
          }
          return deviceList;
@@ -119,9 +137,9 @@ module.exports = function(RED) {
 
 
       // Read the data & return a message object
-      this.read = function(inMsg) {
+      this.read = async function(inMsg) {
          // Retrieve the full set of data
-         var deviceList = this.loadDeviceData();
+         var deviceList = await this.loadDeviceData();
 
          var msgList = [];
          var msg;
@@ -178,14 +196,14 @@ module.exports = function(RED) {
       };
 
       // respond to inputs....
-      this.on('input', function (msg) {
+      this.on('input',async function (msg) {
          this.topic = config.topic;
          if (msg.topic !== undefined && msg.topic !== "") {
             this.topic = msg.topic;
          }
          this.returnArray = msg.array | config.array;
 
-         var arr = this.read(msg);
+         var arr = await this.read(msg);
          
          if (arr) {
             node.send([ arr ]);
